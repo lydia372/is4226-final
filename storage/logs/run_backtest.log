@@ -1,0 +1,1 @@
+2025-11-05 23:15:08,721 [INFO] Backtest completed | Period: 2015-01-01 → 2019-12-31 | Params: MA=130, Trail=10, Pct=0.93, ShortThr=0.02, ATR=14 | Metrics: {'CAGR': 0.2564373029292353, 'Sharpe': 2.390901987424725, 'MaxDrawdown': -0.09976788855027396, 'Calmar': 2.5703390805951973}
