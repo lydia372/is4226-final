@@ -14,6 +14,8 @@ returns/trades + logs to `storage/`.
 ## Setup
 
 ```bash
+git clone https://github.com/lydia372/is4226-final.git
+cd is4226-final
 python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 ```
