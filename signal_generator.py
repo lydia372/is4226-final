@@ -3,14 +3,77 @@ from __future__ import annotations
 import pandas as pd
 import numpy as np
 import yfinance as yf
+from typing import Optional
+import time
 
 # ---------- data ----------
+def _dl(symbol: str, start: str, end: str, interval: str) -> pd.DataFrame:
+    # threads=False is important in notebooks / CI
+    return yf.download(
+        tickers=symbol,
+        start=start,
+        end=end,
+        interval=interval,
+        auto_adjust=True,
+        progress=False,
+        threads=False,
+    )
+
 def fetch_close_series(symbol: str, start: str, end: str, interval: str = "1d") -> pd.Series:
-    tk = yf.Ticker(symbol)
-    hist = tk.history(start=start, end=end, interval=interval, auto_adjust=True)
-    if hist.empty:
+    """
+    Robust loader:
+    1) Try bounded download.
+    2) If empty, retry a few times (short sleeps).
+    3) If still empty, try period='max' then slice.
+    4) If still empty, raise ValueError.
+    """
+    # --- attempt 1..3: normal window ---
+    df = None
+    for attempt in range(3):
+        try:
+            df = _dl(symbol, start, end, interval)
+            if df is not None and not df.empty:
+                break
+        except Exception as e:
+            # mild backoff
+            time.sleep(0.8 * (attempt + 1))
+        time.sleep(0.4)
+
+    # --- fallback: period=max then trim ---
+    if df is None or df.empty:
+        try:
+            df = yf.download(
+                tickers=symbol, period="max", interval=interval,
+                auto_adjust=True, progress=False, threads=False,
+            )
+            if df is not None and not df.empty:
+                df = df.loc[
+                    (df.index >= pd.to_datetime(start)) & (df.index <= pd.to_datetime(end))
+                ]
+        except Exception:
+            pass
+
+    if df is None or df.empty:
         raise ValueError(f"No data for {symbol} in [{start}, {end}]")
-    return hist["Close"].rename(symbol)
+
+    # columns now single-level; prefer "Close", fallback to first column
+    if "Close" in df.columns:
+        ser = df["Close"]
+    else:
+        ser = df.iloc[:, 0]
+
+    # --- ensure 1D: sometimes yfinance gives (n,1) DataFrame ---
+    if isinstance(ser, pd.DataFrame):
+        ser = ser.squeeze("columns")
+
+    ser = ser.astype(float)
+    if getattr(ser.index, "tz", None) is not None:
+        ser.index = ser.index.tz_localize(None)
+    ser = ser.sort_index().dropna()
+    ser.name = symbol
+    assert isinstance(ser, pd.Series), f"Expected Series, got {type(ser)} for {symbol}"
+    return ser
+
 
 # ---------- indicators ----------
 def compute_indicators(
