@@ -231,9 +231,9 @@ def run_backtest(
 
 # --- smoke test (optional) ---
 if __name__ == "__main__":
-    start_date = "2015-01-01"
+    start_date = "2010-01-01"
     end_date   = "2019-12-31"
-    stock_list = ["META","AAPL","AMZN","NFLX","GOOG"]  # MAANG
+    stock_list = ["NVDA","MSFT","AAPL","AMZN","META","AVGO","GOOGL","TSLA","GOOG","BRK-B"]
 
     out = run_backtest(
         start_date=start_date, end_date=end_date, stock_list=stock_list,
