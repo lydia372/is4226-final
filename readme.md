@@ -5,11 +5,11 @@ Starter layout for a systematic trading / backtesting project. It loads prices v
 returns/trades + logs to `storage/`.
 
 ## Project Structure
-- `main.py` - orchestrates the backtest (`run_backtest`) and optional SPY benchmark.
-- `signal_generator.py` - prepares price series and computes indicators/signals.
-- `risk_manager.py` - position sizing (vol target), stops, PnL & equity curve.
-- `notification.py` - file outputs (CSV) and console notices.
-- `storage/` - outputs: `returns.csv`, `trades.csv`, and `logs/run_backtest.log`.
+- `main.py` - orchestrates the backtest (`run_backtest`) and optional SPY benchmark
+- `signal_generator.py` - prepares price series and computes indicators/signals
+- `risk_manager.py` - position sizing (vol target), stops, PnL & equity curve
+- `notification.py` - file outputs (CSV) and console notices
+- `storage/` - outputs: `returns.csv`, `trades.csv`, and `logs/run_backtest.log`
 
 ## Setup
 
@@ -50,10 +50,6 @@ Please run:
 
 ```bash
 pip uninstall -y yfinance
-```
-
-and then run:
-```bash
 pip install yfinance
 ```
 
