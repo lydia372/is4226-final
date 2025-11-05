@@ -1,15 +1,13 @@
-# Trading System Skeleton
+# Group 3 IS4226 Final Project
 
-Starter layout for a systematic trading / backtesting project. It loads prices via
-`yfinance`, builds signals (MA + trailing stop), applies risk controls, and saves
-returns/trades + logs to `storage/`.
+Systematic trading / backtesting project that loads prices via `yfinance`, builds signals (MA + trailing stop), applies risk controls and saves returns/trades + logs to `storage/`.
 
 ## Project Structure
 - `main.py` - orchestrates the backtest (`run_backtest`) and optional SPY benchmark
 - `signal_generator.py` - prepares price series and computes indicators/signals
 - `risk_manager.py` - position sizing (vol target), stops, PnL & equity curve
 - `notification.py` - file outputs (CSV) and console notices
-- `storage/` - outputs: `returns.csv`, `trades.csv`, and `logs/run_backtest.log`
+- `storage/` - outputs: `returns.csv`, `trades.csv` and `logs/run_backtest.log`
 
 ## Setup
 
