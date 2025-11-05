@@ -1,26 +1,62 @@
-Trading System Skeleton
-=======================
+# Trading System Skeleton
 
-This repository provides a starter layout for a systematic trading or backtesting project. The modules are intentionally light so you can layer in your preferred data sources, alpha ideas, and execution logic.
+Starter layout for a systematic trading / backtesting project. It loads prices via
+`yfinance`, builds signals (MA + trailing stop), applies risk controls, and saves
+returns/trades + logs to `storage/`.
 
-Project Structure
------------------
-- `main.py` – Orchestrates the core backtesting / live iteration loop.
-- `signal_generator.py` – Builds features and trading signals from raw market data.
-- `risk_manager.py` – Applies risk controls (position sizing, stop losses, pnl updates).
-- `notification.py` – Handles logging and persistence of trades/returns.
-- `storage/` – Default persistence path for CSV exports and logs.
+## Project Structure
+- `main.py` - orchestrates the backtest (`run_backtest`) and optional SPY benchmark.
+- `signal_generator.py` - prepares price series and computes indicators/signals.
+- `risk_manager.py` - position sizing (vol target), stops, PnL & equity curve.
+- `notification.py` - file outputs (CSV) and console notices.
+- `storage/` - outputs: `returns.csv`, `trades.csv`, and `logs/run_backtest.log`.
 
-Getting Started
----------------
-1. Populate `storage/` with your historical or live data inputs.
-2. Flesh out `SignalGenerator.prepare_data` and `SignalGenerator.generate_signals` with your alpha logic.
-3. Implement the sizing and pnl logic inside `RiskManager` to match your strategy constraints.
-4. Extend `BacktestingEngine.load_data` and `BacktestingEngine.execute_orders` to wire in real data feeds / broker APIs.
-5. Run `python main.py` to execute a single iteration (looping/backtest driver is up to you).
+## Setup
 
-Next Steps
-----------
-- Add tests (e.g., `pytest`) to validate the signal and risk modules.
-- Introduce configuration management (`yaml`, `.env`, CLI args) to manage parameter sweeps.
-- Replace the placeholder notification logic with your analytics stack or alerting system.
+```bash
+python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+```
+
+## Quick Start
+
+Run an in-sample backtest from the CLI:
+```bash
+python main.py
+```
+
+Or use the provided notebook (`Group3_FinalTerm.ipynb`) [RECOMMENDED]
+The final cell (for graders) defines:
+- `start_date`,`end_date`,`stock_list`
+- all strategy params
+- calls `run_backtest(...)`
+- renders visuals and prints metrics
+
+## Outputs
+- CSVs
+    - `storage/returns.csv` - daily returns / equity
+    - `storage/trades.csv` - executed trades
+- Logs 
+    - `storage/logs/run_backtest.log` - run metadata and summary metrics
+
+## Troubleshooting
+
+- `ValueError: Data must be 1-dimensional`
+Ensure you squeeze yfinance columns to a Series (handled in signal_generator.fetch_close_series)
+- Benchmark misalignment
+We reindex/align calendars; however if the error occurs please check your date range.
+- `IndexError: single positional indexer is out-of-bounds` (i.e. NAN data from yfinance)
+Please run:
+
+```bash
+pip uninstall -y yfinance
+```
+
+and then run:
+```bash
+pip install yfinance
+```
+
+and restart your kernel for the notebook to rerun.
+
+Thank you! - Group 3
