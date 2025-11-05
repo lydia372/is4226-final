@@ -18,19 +18,20 @@ python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\act
 pip install -r requirements.txt
 ```
 
-## Quick Start
+## How to Use
+Run provided notebook (`Group3_FinalTerm.ipynb`) [RECOMMENDED]
 
-Run an in-sample backtest from the CLI:
-```bash
-python main.py
-```
-
-Or use the provided notebook (`Group3_FinalTerm.ipynb`) [RECOMMENDED]
 The final cell (for graders) defines:
 - `start_date`,`end_date`,`stock_list`
 - all strategy params
 - calls `run_backtest(...)`
 - renders visuals and prints metrics
+
+### Quick Start
+Run a simple in-sample backtest from the CLI:
+```bash
+python main.py
+```
 
 ## Outputs
 - CSVs
