@@ -3,3 +3,4 @@ pandas==2.1.4
 matplotlib>=3.7,<3.10
 yfinance==0.2.43
 ta>=0.10.2
+PyPortfolioOpt>=1.5.4

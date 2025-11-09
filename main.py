@@ -56,6 +56,95 @@ def _rolling_cagr(ser: pd.Series, win: int, ann: int = 252) -> pd.Series:
     yrs = win/ann
     return growth.pow(1.0/yrs) - 1.0
 
+# ---------- PyPortfolioOpt helper ----------
+def _compute_pfopt_weights(
+    prices: pd.DataFrame,
+    objective: str = "max_sharpe",
+    bounds: Tuple[float, float] = (0.0, 1.0),
+    frequency: int = 252,
+    risk_free_rate: float = 0.0,
+    clean: bool = True,
+) -> pd.Series:
+    """
+    Derive static allocation weights with PyPortfolioOpt given a price history.
+    """
+    try:
+        from pypfopt import EfficientFrontier, expected_returns, risk_models
+    except ImportError as exc:
+        raise ImportError(
+            "PyPortfolioOpt is required for allocation_method='pypfopt'. Install with pip install PyPortfolioOpt."
+        ) from exc
+
+    if prices is None or prices.empty or prices.shape[0] < 2:
+        raise ValueError("Insufficient price history for PyPortfolioOpt optimisation.")
+
+    objective = (objective or "max_sharpe").lower()
+
+    mu = expected_returns.mean_historical_return(prices, frequency=frequency)
+    cov = risk_models.sample_cov(prices, frequency=frequency)
+    ef = EfficientFrontier(mu, cov, weight_bounds=bounds)
+
+    if objective == "max_sharpe":
+        ef.max_sharpe(risk_free_rate=risk_free_rate)
+    elif objective in {"min_vol", "min_volatility"}:
+        ef.min_volatility()
+    else:
+        raise ValueError(f"Unknown PyPortfolioOpt objective: {objective}")
+
+    if clean:
+        weights = pd.Series(ef.clean_weights())
+    else:
+        weights = pd.Series(ef.weights, index=prices.columns)
+
+    return weights.reindex(prices.columns).fillna(0.0)
+
+
+def _apply_drawdown_limit(
+    strat_ret: pd.DataFrame,
+    weights: pd.DataFrame,
+    threshold: float | None,
+) -> Tuple[pd.DataFrame, pd.Timestamp | None]:
+    """
+    Hard cap drawdown by flattening the book once equity slips below the threshold.
+    Returns updated weights and the trigger date (if any).
+    """
+    if weights is None or weights.empty or threshold is None or threshold <= 0:
+        return weights, None
+
+    limit = float(threshold)
+    adj_w = weights.copy()
+    port_ret = (strat_ret * adj_w).sum(axis=1).fillna(0.0)
+
+    equity = 1.0
+    peak = 1.0
+    trigger = None
+
+    for idx in port_ret.index:
+        r = float(port_ret.loc[idx])
+        prev_equity = equity
+        equity = prev_equity * (1.0 + r)
+        peak = max(peak, equity)
+        dd = equity / peak - 1.0 if peak > 0 else 0.0
+        if dd < -limit:
+            trigger = idx
+            capped_eq = peak * (1.0 - limit)
+            adj_ret = (capped_eq / prev_equity - 1.0) if prev_equity > 0 else max(-limit, r)
+            orig_ret = r
+            pos = adj_w.index.get_loc(idx)
+            if orig_ret == 0:
+                adj_w.iloc[pos] = 0.0
+            else:
+                scale = adj_ret / orig_ret
+                if not np.isfinite(scale):
+                    scale = 0.0
+                scale = min(scale, 1.0)  # never increase exposure when capping loss
+                adj_w.iloc[pos] = adj_w.iloc[pos] * scale
+            if pos + 1 < len(adj_w):
+                adj_w.iloc[pos + 1 :] = 0.0
+            break
+
+    return adj_w, trigger
+
 # ---------- main backtest (out-of-sample) ----------
 def run_backtest(
     start_date: str,
@@ -81,6 +170,14 @@ def run_backtest(
     gross_cap: float = 1.0,        # sum |weights| cap
     roll_vol: int = 20,            # vol lookback (days)
     perf_lookback: int = 63,       # rolling CAGR filter window (~3m)
+    # allocation controls
+    allocation_method: str = "vol_target",
+    pfopt_objective: str = "max_sharpe",
+    pfopt_bounds: Tuple[float, float] = (0.0, 1.0),
+    pfopt_frequency: int = 252,
+    pfopt_risk_free_rate: float = 0.0,
+    pfopt_clean_weights: bool = True,
+    max_drawdown: float | None = None,
     # others
     initial_capital: float = 500_000.0,
     interval: str = "1d",
@@ -90,6 +187,9 @@ def run_backtest(
 
     stock_list = list(stock_list)
     assert len(stock_list) > 0, "stock_list is empty"
+    allocation_method = (allocation_method or "vol_target").lower()
+    if allocation_method not in {"vol_target", "pypfopt"}:
+        raise ValueError("allocation_method must be either 'vol_target' or 'pypfopt'")
 
     notify(f"Loading {len(stock_list)} symbols: {', '.join(stock_list)}")
 
@@ -115,9 +215,12 @@ def run_backtest(
     if len(common_idx) < 50:
         notify(f"Warning: small overlapping date range: {len(common_idx)} days.")
 
+    price_panel = pd.DataFrame({s: ser.reindex(common_idx) for s, ser in px_map.items()})
+
     # reindex series to common dates
     px_map = {s: ser.reindex(common_idx).dropna() for s, ser in px_map.items()}
     stock_list = list(px_map.keys())
+    price_panel = price_panel[stock_list]
     if skipped:
         notify(f"Proceeding with {len(stock_list)} symbols after skipping: {', '.join(skipped)}")
 
@@ -154,22 +257,47 @@ def run_backtest(
     strat_ret = pd.DataFrame({s: per_symbol[s]["strat_ret"] for s in stock_list}).fillna(0.0)
     positions = pd.DataFrame({s: per_symbol[s]["position"] for s in stock_list}).fillna(0)
 
-    # ---- volatility targeting + gross exposure cap ----
-    ann = 252
-    sigma = strat_ret.rolling(roll_vol).std() * np.sqrt(ann)
-    raw_w = (positions.replace(0, np.nan) * (target_vol / sigma)).fillna(0.0)
-    gross = raw_w.abs().sum(axis=1).replace(0, np.nan)
-    scale = (gross_cap / gross).clip(upper=1.0)
-    weights = (raw_w.T * scale).T.fillna(0.0)
-
     # ---- rolling performance filter ----
     rc = strat_ret.apply(lambda s: _rolling_cagr(s, win=perf_lookback))
     mask = (rc > 0).fillna(False)
-    weights = weights.where(mask, 0.0)
-    # re-scale
-    gross = weights.abs().sum(axis=1).replace(0, np.nan)
-    scale = (gross_cap / gross).clip(upper=1.0)
-    weights = (weights.T * scale).T.fillna(0.0)
+
+    pfopt_weights = None
+    if allocation_method == "pypfopt":
+        train_prices = price_panel.loc[price_panel.index.isin(train_idx)]
+        train_prices = train_prices.dropna(how="any")
+        if train_prices.shape[0] < 2:
+            notify("PyPortfolioOpt allocation skipped: insufficient training history. Reverting to volatility targeting.")
+            allocation_method = "vol_target"
+        else:
+            try:
+                pfopt_weights = _compute_pfopt_weights(
+                    train_prices,
+                    objective=pfopt_objective,
+                    bounds=pfopt_bounds,
+                    frequency=pfopt_frequency,
+                    risk_free_rate=pfopt_risk_free_rate,
+                    clean=pfopt_clean_weights,
+                )
+                notify(f"PyPortfolioOpt allocation (objective={pfopt_objective}) applied.")
+            except Exception as err:
+                notify(f"PyPortfolioOpt allocation failed ({err}). Reverting to volatility targeting.")
+                allocation_method = "vol_target"
+
+    ann = 252
+    if allocation_method == "pypfopt":
+        pf_series = pfopt_weights.reindex(stock_list).fillna(0.0)
+        base_w = positions.mul(pf_series, axis=1)
+        base_w = base_w.where(mask, 0.0)
+        gross = base_w.abs().sum(axis=1).replace(0, np.nan)
+        scale = (gross_cap / gross).clip(upper=1.0)
+        weights = (base_w.T * scale).T.fillna(0.0)
+    else:
+        sigma = strat_ret.rolling(roll_vol).std() * np.sqrt(ann)
+        raw_w = (positions.replace(0, np.nan) * (target_vol / sigma)).fillna(0.0)
+        raw_w = raw_w.where(mask, 0.0)
+        gross = raw_w.abs().sum(axis=1).replace(0, np.nan)
+        scale = (gross_cap / gross).clip(upper=1.0)
+        weights = (raw_w.T * scale).T.fillna(0.0)
 
     # ---- portfolio aggregation ----
     port_ret = (strat_ret * weights).sum(axis=1).fillna(0.0)
@@ -216,10 +344,11 @@ def run_backtest(
         "weights": weights,
         "positions": positions,
         "per_symbol": per_symbol,
+        "allocation_method": allocation_method,
+        "pfopt_weights": pfopt_weights,
         "train_idx": train_idx,
         "test_idx": test_idx,
     }
-
 
 # ---------- plotting functions ----------
 def plot_exposure(results, gross_cap_expected=1.0):
