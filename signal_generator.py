@@ -75,6 +75,34 @@ def fetch_close_series(symbol: str, start: str, end: str, interval: str = "1d") 
     return ser
 
 
+# ---------- market regime detection ----------
+def detect_market_regime(
+    px: pd.Series,
+    lookback: int = 20,
+    vol_lookback: int = 20,
+    bear_threshold: float = -0.05,  # -5% return over lookback = bear market
+    high_vol_multiplier: float = 1.5,  # 1.5x median vol = high volatility
+) -> pd.Series:
+    """
+    Detect bear market regime based on rolling returns and volatility.
+    Returns: 1 for bear market, 0 for normal/bull market
+    """
+    returns = px.pct_change()
+    
+    # Rolling return over lookback period
+    rolling_ret = (1 + returns).rolling(lookback).apply(lambda x: np.nanprod(x), raw=True) - 1
+    
+    # Rolling volatility
+    rolling_vol = returns.rolling(vol_lookback).std() * np.sqrt(252)
+    median_vol = rolling_vol.rolling(252).median()  # 1-year median vol
+    
+    # Bear market: negative returns AND high volatility
+    is_bear = (rolling_ret < bear_threshold) | (
+        (rolling_ret < 0) & (rolling_vol > median_vol * high_vol_multiplier)
+    )
+    
+    return pd.Series(is_bear.astype(int), index=px.index, name="bear_market").fillna(0)
+
 # ---------- indicators ----------
 def compute_indicators(
     px: pd.Series,
@@ -82,6 +110,7 @@ def compute_indicators(
     trailing_window: int,
     trailing_pct: float,
     atr_win: int,
+    bear_lookback: int = 20,
 ) -> pd.DataFrame:
     df = pd.DataFrame({"Close": px})
     df["MA"] = df["Close"].rolling(ma_window, min_periods=ma_window).mean()
@@ -91,20 +120,59 @@ def compute_indicators(
     # simple ATR proxy from % moves (keeps us data-light)
     r = df["Close"].pct_change().abs()
     df["ATR_px"] = r.rolling(atr_win).mean() * df["Close"]  # ATR expressed in price units
+    
+    # Market regime detection
+    df["bear_market"] = detect_market_regime(px, lookback=bear_lookback)
+    
+    # Rolling volatility for position sizing
+    returns = df["Close"].pct_change()
+    df["volatility"] = returns.rolling(20).std() * np.sqrt(252)  # Annualized vol
+    
     return df.dropna()
 
 # ---------- desired (trend) signal: +1 long, -1 short, 0 flat ----------
 def desired_signal(
     df: pd.DataFrame,
-    short_threshold: float = 0.02,  # must be >=2% below MA to short
+    short_threshold: float = 0.02,  # must be >=2% below MA to short (normal market)
+    bear_short_threshold: float = 0.01,  # more aggressive shorting in bear markets (1% below MA)
 ) -> pd.Series:
-    close, ma, ts, slope = df["Close"], df["MA"], df["TrailStop"], df["MA_slope"]
-
+    close = df["Close"]
+    ma = df["MA"]
+    ts = df["TrailStop"]
+    slope = df["MA_slope"]
+    bear_market = df.get("bear_market", pd.Series(0, index=df.index))
+    
+    # Dynamic short threshold: lower in bear markets for more aggressive shorting
+    dynamic_short_thresh = np.where(bear_market > 0, bear_short_threshold, short_threshold)
+    
+    # Long signals: more restrictive in bear markets
+    long_condition = (close > ma) | (close > ts)
+    # In bear markets, require stronger signal (price must be above MA by more)
+    long_condition = np.where(
+        bear_market > 0,
+        (close > ma * 1.01) & (close > ts),  # Require 1% above MA in bear markets
+        long_condition
+    )
+    
+    # Short signals: more aggressive in bear markets
+    # Normal: close < MA*(1-threshold) AND close < TS AND slope < 0
+    # Bear: close < MA*(1-threshold) OR (close < TS AND slope < 0) - more permissive
+    short_condition_normal = (
+        (close < ma * (1 - short_threshold)) & 
+        (close < ts) & 
+        (slope < 0)
+    )
+    short_condition_bear = (
+        (close < ma * (1 - bear_short_threshold)) | 
+        ((close < ts) & (slope < 0))
+    )
+    short_condition = np.where(bear_market > 0, short_condition_bear, short_condition_normal)
+    
     want = np.where(
-        (close > ma) | (close > ts),  # permissive long
+        long_condition,
         1,
         np.where(
-            (close < ma * (1 - short_threshold)) & (close < ts) & (slope < 0),  # selective short
+            short_condition,
             -1,
             0,
         ),
@@ -119,7 +187,9 @@ def build_alpha(
     trailing_pct: float,
     atr_win: int,
     short_threshold: float,
+    bear_lookback: int = 20,
+    bear_short_threshold: float = 0.01,
 ) -> pd.DataFrame:
-    ind = compute_indicators(px, ma_window, trailing_window, trailing_pct, atr_win)
-    ind["desired"] = desired_signal(ind, short_threshold=short_threshold)
+    ind = compute_indicators(px, ma_window, trailing_window, trailing_pct, atr_win, bear_lookback)
+    ind["desired"] = desired_signal(ind, short_threshold=short_threshold, bear_short_threshold=bear_short_threshold)
     return ind

@@ -157,11 +157,12 @@ def run_backtest(
     trailing_pct: float = 0.93,
     short_threshold: float = 0.02,
     atr_win: int = 14,
+    bear_lookback: int = 20,  # lookback for bear market detection
+    bear_short_threshold: float = 0.01,  # more aggressive short threshold in bear markets
     # execution/risk params
     cooldown_bars: int = 3,
     reentry_eps: float = 0.005,
     min_hold: int = 5,
-    weekly_exec: bool = True,
     k_atr_stop: float = 2.5,
     giveback_atr: float = 2.0,
     time_stop: int = 60,
@@ -170,6 +171,9 @@ def run_backtest(
     gross_cap: float = 1.0,        # sum |weights| cap
     roll_vol: int = 20,            # vol lookback (days)
     perf_lookback: int = 63,       # rolling CAGR filter window (~3m)
+    vol_scaling: bool = True,      # scale positions down during high volatility
+    vol_scaling_threshold: float = 1.5,  # scale down when vol > threshold * median vol
+    vol_scaling_min: float = 0.3,  # minimum position size during high vol (30% of normal)
     # allocation controls
     allocation_method: str = "vol_target",
     pfopt_objective: str = "max_sharpe",
@@ -237,7 +241,6 @@ def run_backtest(
         cooldown_bars=cooldown_bars,
         reentry_eps=reentry_eps,
         min_hold=min_hold,
-        weekly_exec=weekly_exec,
         k_atr_stop=k_atr_stop,
         giveback_atr=giveback_atr,
         time_stop=time_stop
@@ -247,7 +250,8 @@ def run_backtest(
     for s in stock_list:
         alpha_full = build_alpha(
             px_map[s], ma_window=ma_window, trailing_window=trailing_window,
-            trailing_pct=trailing_pct, atr_win=atr_win, short_threshold=short_threshold
+            trailing_pct=trailing_pct, atr_win=atr_win, short_threshold=short_threshold,
+            bear_lookback=bear_lookback, bear_short_threshold=bear_short_threshold
         )
         # simulate only on test period
         path = simulate_trade_path(alpha_full.loc[test_idx], exec_params)
@@ -298,6 +302,42 @@ def run_backtest(
         gross = raw_w.abs().sum(axis=1).replace(0, np.nan)
         scale = (gross_cap / gross).clip(upper=1.0)
         weights = (raw_w.T * scale).T.fillna(0.0)
+    
+    # Volatility-based position scaling: reduce exposure during high volatility periods
+    if vol_scaling:
+        # Compute portfolio-level volatility
+        port_ret_temp = (strat_ret * weights).sum(axis=1).fillna(0.0)
+        port_vol = port_ret_temp.rolling(roll_vol).std() * np.sqrt(ann)
+        median_vol = port_vol.rolling(252).median()  # 1-year rolling median
+        
+        # Scale down positions when volatility is high
+        high_vol_mask = (port_vol > median_vol * vol_scaling_threshold) & (median_vol > 0)
+        # Scale factor: 1.0 when vol is normal, decreasing to vol_scaling_min when vol is very high
+        vol_scale = pd.Series(1.0, index=weights.index)
+        for idx in weights.index:
+            if high_vol_mask.loc[idx] and median_vol.loc[idx] > 0:
+                vol_ratio = float(port_vol.loc[idx] / (median_vol.loc[idx] * vol_scaling_threshold))
+                # Inverse scaling: higher vol -> lower scale (but not below min)
+                vol_scale.loc[idx] = max(vol_scaling_min, 1.0 / vol_ratio)
+        
+        # Apply volatility scaling, but preserve short positions during bear markets
+        # Don't scale shorts as aggressively (they benefit from high vol)
+        # Only scale down longs during high volatility
+        for col in weights.columns:
+            # Scale down longs more aggressively than shorts
+            long_mask = weights[col] > 0
+            short_mask = weights[col] < 0
+            if long_mask.any():
+                weights.loc[long_mask, col] = weights.loc[long_mask, col] * vol_scale.loc[long_mask]
+            if short_mask.any():
+                # Scale shorts less (maybe 70% of normal size instead of full scaling)
+                short_scale = 0.7 + 0.3 * vol_scale.loc[short_mask]  # At least 70% of normal
+                weights.loc[short_mask, col] = weights.loc[short_mask, col] * short_scale
+        
+        # Re-normalize to respect gross cap after scaling
+        gross = weights.abs().sum(axis=1).replace(0, np.nan)
+        scale = (gross_cap / gross).clip(upper=1.0)
+        weights = (weights.T * scale).T.fillna(0.0)
 
     # ---- portfolio aggregation ----
     port_ret = (strat_ret * weights).sum(axis=1).fillna(0.0)
@@ -424,7 +464,7 @@ if __name__ == "__main__":
     out = run_backtest(
         start_date=start_date, end_date=end_date, stock_list=stock_list,
         ma_window=130, trailing_window=10, trailing_pct=0.93, short_threshold=0.02,
-        atr_win=14, cooldown_bars=3, reentry_eps=0.005, min_hold=5, weekly_exec=True,
+        atr_win=14, cooldown_bars=3, reentry_eps=0.005, min_hold=5,
         k_atr_stop=2.5, giveback_atr=2.0, time_stop=60,
         target_vol=0.10, gross_cap=1.0, roll_vol=20, perf_lookback=63,
         initial_capital=500_000.0, compare_spy=True, tag="strategy1"

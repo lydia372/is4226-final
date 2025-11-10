@@ -9,7 +9,6 @@ class ExecParams:
         cooldown_bars: int = 3,
         reentry_eps: float = 0.005,
         min_hold: int = 5,
-        weekly_exec: bool = True,
         k_atr_stop: float = 2.5,   # catastrophic stop (× ATR_px)
         giveback_atr: float = 2.0, # profit giveback (× ATR_px)
         time_stop: int = 60,       # max bars in trade
@@ -17,20 +16,17 @@ class ExecParams:
         self.cooldown_bars = cooldown_bars
         self.reentry_eps = reentry_eps
         self.min_hold = min_hold
-        self.weekly_exec = weekly_exec
         self.k_atr_stop = k_atr_stop
         self.giveback_atr = giveback_atr
         self.time_stop = time_stop
 
-def _is_trade_day(dt: pd.Timestamp, weekly_exec: bool) -> bool:
-    return (dt.weekday() == 4) if weekly_exec else True  # Friday only if weekly
-
 def simulate_trade_path(df: pd.DataFrame, p: ExecParams) -> pd.DataFrame:
     """
-    Inputs df columns: Close, MA, MA_slope, TrailStop, ATR_px, desired
+    Inputs df columns: Close, MA, MA_slope, TrailStop, ATR_px, desired, bear_market (optional)
     Returns DataFrame with: position {+1,0,-1}, entry_px, cashflow_ret (strategy return)
     """
     close = df["Close"]; ma = df["MA"]; ts = df["TrailStop"]; slope = df["MA_slope"]; atr = df["ATR_px"]; want = df["desired"]
+    bear_market = df.get("bear_market", pd.Series(0, index=df.index))
 
     pos = np.zeros(len(df), dtype=int)
     entry_px = np.full(len(df), np.nan)
@@ -39,9 +35,6 @@ def simulate_trade_path(df: pd.DataFrame, p: ExecParams) -> pd.DataFrame:
     peak = trough = np.nan
 
     for i in range(1, len(df)):
-        dt = df.index[i]
-        trade_day = _is_trade_day(dt, p.weekly_exec)
-
         prev = pos[i-1]
         curr = prev
         price = close.iloc[i]
@@ -64,34 +57,32 @@ def simulate_trade_path(df: pd.DataFrame, p: ExecParams) -> pd.DataFrame:
 
         time_exit = (prev!=0) and (bars_held >= p.time_stop)
 
-        # not a scheduled trade day → only allow catastrophic stop
-        if not trade_day and not cat_long and not cat_short:
-            curr = prev
-        else:
-            # manage open positions
-            if prev>0:  # long
-                base_exit = (want.iloc[i] <= 0)
-                if (base_exit and bars_held >= p.min_hold) or cat_long or gb_exit or time_exit:
-                    curr = 0; cooldown = p.cooldown_bars
+        # manage open positions (daily execution - no weekly restriction)
+        if prev>0:  # long
+            base_exit = (want.iloc[i] <= 0)
+            if (base_exit and bars_held >= p.min_hold) or cat_long or gb_exit or time_exit:
+                curr = 0; cooldown = p.cooldown_bars
 
-            elif prev<0:  # short
-                base_exit = (want.iloc[i] >= 0)
-                if (base_exit and bars_held >= p.min_hold) or cat_short or gb_exit or time_exit:
-                    curr = 0; cooldown = p.cooldown_bars
+        elif prev<0:  # short
+            base_exit = (want.iloc[i] >= 0)
+            if (base_exit and bars_held >= p.min_hold) or cat_short or gb_exit or time_exit:
+                curr = 0; cooldown = p.cooldown_bars
 
-            else:  # flat → entry
-                if cooldown > 0:
-                    cooldown -= 1
-                    curr = 0
+        else:  # flat → entry
+            if cooldown > 0:
+                cooldown -= 1
+                curr = 0
+            else:
+                is_bear = bear_market.iloc[i] > 0 if i < len(bear_market) else False
+                go_long  = (price > ma.iloc[i]*(1+p.reentry_eps)) or (price > ts.iloc[i]*(1+p.reentry_eps))
+                go_short = (price < ma.iloc[i]*(1-p.reentry_eps)) and (price < ts.iloc[i]*(1-p.reentry_eps)) and (slope.iloc[i] < 0)
+                # In bear markets, avoid entering long positions (only allow shorts or stay flat)
+                if want.iloc[i] > 0 and go_long and not is_bear:
+                    curr = 1; entry_px[i] = price; bars_held = 0; peak = trough = price
+                elif want.iloc[i] < 0 and go_short:
+                    curr = -1; entry_px[i] = price; bars_held = 0; peak = trough = price
                 else:
-                    go_long  = (price > ma.iloc[i]*(1+p.reentry_eps)) or (price > ts.iloc[i]*(1+p.reentry_eps))
-                    go_short = (price < ma.iloc[i]*(1-p.reentry_eps)) and (price < ts.iloc[i]*(1-p.reentry_eps)) and (slope.iloc[i] < 0)
-                    if want.iloc[i] > 0 and go_long:
-                        curr = 1; entry_px[i] = price; bars_held = 0; peak = trough = price
-                    elif want.iloc[i] < 0 and go_short:
-                        curr = -1; entry_px[i] = price; bars_held = 0; peak = trough = price
-                    else:
-                        curr = 0
+                    curr = 0
 
         # disallow instant flip through flat without cooldown
         if (prev>0 and curr<0) or (prev<0 and curr>0):
